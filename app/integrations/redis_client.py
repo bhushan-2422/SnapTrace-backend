@@ -55,8 +55,16 @@ def dequeue_image(timeout: int = 5) -> int | None:
     """Consumer side: block up to `timeout` seconds for the next image id.
 
     Returns None when the queue stayed quiet (worker loop sleeps again).
+
+    Note: the client's socket timeout is 2s (fail-fast for API calls),
+    which is shorter than this blocking wait - an idle BRPOP therefore
+    raises TimeoutError before the server replies.  That is treated
+    exactly like an empty queue instead of killing the worker.
     """
-    item = get_redis().brpop(constants.IMAGE_QUEUE, timeout=timeout)
+    try:
+        item = get_redis().brpop(constants.IMAGE_QUEUE, timeout=timeout)
+    except redis.exceptions.TimeoutError:
+        return None
     if item is None:
         return None
     _queue_name, payload = item  # BRPOP -> (queue, value)

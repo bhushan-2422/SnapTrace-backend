@@ -22,7 +22,7 @@ __all__ = [
     "get_db",
     "get_current_user",
     "get_owned_event",
-    "get_searchable_event",
+    "get_joined_event",
     "get_page_params",
 ]
 
@@ -67,20 +67,25 @@ def get_owned_event(
     return event
 
 
-def get_searchable_event(
+def get_joined_event(
     event_id: int,
     db: Session = Depends(get_db),
     user: User = Depends(get_current_user),
 ) -> Event:
-    """Any signed-in user may search an existing event.
+    """The event, but only for its owner or members.
 
-    Retrieval is still scoped to that one event; restricting who may
-    search which album (event membership) is deliberately left for the
-    next iteration - see the project notes.
+    Used by every endpoint that touches album content (upload, list,
+    read, faces, search, processing status).  Non-members get 403 even
+    when the event id is known - joining happens via the shared link.
     """
     event = event_service.get_event(db, event_id)
     if event is None:
         raise HTTPException(status_code=404, detail="Event not found")
+    if event.owner_id != user.id and not event_service.is_member(db, event.id, user.id):
+        raise HTTPException(
+            status_code=403,
+            detail="Join this event first (POST /events/{event_id}/join)",
+        )
     return event
 
 

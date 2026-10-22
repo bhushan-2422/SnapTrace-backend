@@ -6,7 +6,7 @@ from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile
 from fastapi import status as http_status
 from sqlalchemy.orm import Session
 
-from app.api.dependencies import get_db, get_searchable_event
+from app.api.dependencies import get_db, get_joined_event
 from app.config import settings
 from app.controllers import search_controller
 from app.models.event import Event
@@ -29,11 +29,12 @@ async def search_event(
         description="Maximum number of photos to return.",
     ),
     db: Session = Depends(get_db),
-    event: Event = Depends(get_searchable_event),
+    event: Event = Depends(get_joined_event),
 ):
     """Detect + embed the selfie and rank this event's photos against it.
 
-    The selfie is deleted from public/search/ right after embedding.
+    Available to the owner and every joined member.  The selfie is
+    deleted from public/search/ right after embedding.
     """
     try:
         return await search_controller.search(

@@ -38,7 +38,9 @@ class QueueUnavailable(Exception):
     """Redis is down - the upload cannot be queued for processing."""
 
 
-async def store_uploads(db: Session, event: Event, uploads: list[UploadFile]) -> list[Image]:
+async def store_uploads(
+    db: Session, event: Event, uploads: list[UploadFile], *, uploaded_by: int
+) -> list[Image]:
     """Validate, save and register uploaded photos, then queue them.
 
     The files and their rows are committed first; queueing happens
@@ -70,6 +72,7 @@ async def store_uploads(db: Session, event: Event, uploads: list[UploadFile]) ->
                 s3_key=key,
                 original_filename=file_utils.safe_original_name(upload.filename),
                 status=ImageStatus.UPLOADED.value,
+                uploaded_by=uploaded_by,
             )
         )
 

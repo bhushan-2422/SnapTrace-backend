@@ -13,9 +13,11 @@ from app.repositories.face_repository import FaceRepository
 from app.services import image_service
 
 
-async def upload(db: Session, event: Event, files: list[UploadFile]) -> ImageUploadResponse:
+async def upload(
+    db: Session, event: Event, files: list[UploadFile], *, uploaded_by: int
+) -> ImageUploadResponse:
     """Store the photos on disk, register them as `uploaded`, queue them."""
-    images = await image_service.store_uploads(db, event, files)
+    images = await image_service.store_uploads(db, event, files, uploaded_by=uploaded_by)
     return ImageUploadResponse(
         event_id=event.id,
         accepted=len(images),

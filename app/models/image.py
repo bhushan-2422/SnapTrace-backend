@@ -52,6 +52,14 @@ class Image(Base):
     s3_url: Mapped[str | None] = mapped_column(Text, nullable=True)
     original_filename: Mapped[str] = mapped_column(String(255), nullable=False)
 
+    # Who uploaded this photo. NULL only for rows created before this
+    # column existed; used by the delete rule (uploader or event owner).
+    uploaded_by: Mapped[int | None] = mapped_column(
+        Integer,
+        ForeignKey("users.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+
     # Stored as a plain string value ("uploaded", ...) with the enum used as
     # the application-level vocabulary.
     status: Mapped[str] = mapped_column(

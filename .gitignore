@@ -14,11 +14,13 @@ env/
 .mypy_cache/
 .ruff_cache/
 
-# Runtime data (temp downloads, FAISS indexes)
+# Runtime data (temp downloads, FAISS indexes, uploaded photos)
 data/temp/*
 data/faiss/*
 !data/temp/.gitkeep
 !data/faiss/.gitkeep
+public/events/*
+!public/events/.gitkeep
 
 # Generated embedding cache (rebuild with app/processing/pipeline.py)
 embeddings.csv

@@ -21,8 +21,16 @@ def create(db: Session, user: User, payload: EventCreate) -> EventResponse:
 
 
 def list_mine(db: Session, user: User, *, limit: int, offset: int) -> list[EventResponse]:
-    events = event_service.list_events(db, owner_id=user.id, limit=limit, offset=offset)
+    events = event_service.list_events(db, user_id=user.id, limit=limit, offset=offset)
     return [EventResponse.model_validate(event) for event in events]
+
+
+def join(db: Session, user: User, event: Event) -> None:
+    event_service.join_event(db, event, user)
+
+
+def leave(db: Session, user: User, event: Event) -> None:
+    event_service.leave_event(db, event, user)
 
 
 def get(event: Event) -> EventResponse:

@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.models.event import Event
+from app.models.event_member import EventMember
 
 
 class EventRepository:
@@ -34,6 +35,22 @@ class EventRepository:
 
     def list_by_owner(self, owner_id: int, *, limit: int = 100, offset: int = 0) -> list[Event]:
         return self.list(owner_id=owner_id, limit=limit, offset=offset)
+
+    def list_for_user(
+        self, user_id: int, *, limit: int = 100, offset: int = 0
+    ) -> list[Event]:
+        """Home page: every event this user owns or has joined."""
+        stmt = (
+            select(Event)
+            .where(
+                (Event.owner_id == user_id)
+                | Event.id.in_(select(EventMember.event_id).where(EventMember.user_id == user_id))
+            )
+            .order_by(Event.created_at.desc(), Event.id.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(self.db.scalars(stmt).all())
 
     def add(self, event: Event) -> Event:
         self.db.add(event)

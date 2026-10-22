@@ -68,16 +68,22 @@ def download_file(key: str, local_path: Path) -> None:
         raise StorageError(f"s3 download failed for {key}: {exc}") from exc
 
 
-def presigned_url(key: str) -> str | None:
+def presigned_url(key: str, *, download_filename: str | None = None) -> str | None:
     """Short-lived download URL for a private object.
 
     The raw object key is never handed to clients - they only ever see
     this signed link, which is what keeps other people's photos private.
+    Pass `download_filename` to force a browser download (attachment)
+    with that filename instead of inline display.
     """
+    params: dict = {"Bucket": settings.S3_BUCKET, "Key": key}
+    if download_filename:
+        safe = download_filename.replace('"', "").replace("\n", "")
+        params["ResponseContentDisposition"] = f'attachment; filename="{safe}"'
     try:
         return _client().generate_presigned_url(
             "get_object",
-            Params={"Bucket": settings.S3_BUCKET, "Key": key},
+            Params=params,
             ExpiresIn=PRESIGNED_EXPIRES_SECONDS,
         )
     except (BotoCoreError, ClientError) as exc:

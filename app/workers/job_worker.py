@@ -15,6 +15,8 @@ import argparse
 import logging
 import time
 
+from redis.exceptions import RedisError
+
 from app.db.session import SessionLocal
 from app.integrations import redis_client
 from app.workers import image_processor
@@ -34,12 +36,23 @@ def handle(image_id: int) -> bool:
 def run_forever() -> None:
     logger.info("worker started, waiting for jobs...")
     while True:
-        image_id = redis_client.dequeue_image(timeout=5)
+        try:
+            image_id = redis_client.dequeue_image(timeout=5)
+        except RedisError as exc:
+            logger.warning("redis error while waiting for jobs: %s", exc)
+            time.sleep(1)
+            continue
         if image_id is None:
             continue  # quiet queue, loop again (allows clean Ctrl+C)
-        started = time.perf_counter()
-        handle(image_id)
-        logger.info("finished image %s in %.1fs", image_id, time.perf_counter() - started)
+        try:
+            started = time.perf_counter()
+            handle(image_id)
+            logger.info("finished image %s in %.1fs", image_id, time.perf_counter() - started)
+        except Exception:
+            # process_image already contains per-image failures; this
+            # guards against unexpected ones (DB down, disk error) so
+            # one bad job can never stop the worker permanently.
+            logger.exception("unexpected error while processing image %s", image_id)
 
 
 def drain() -> None:
