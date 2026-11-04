@@ -1,521 +1,497 @@
-import pandas as pd
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-import cv2
 import ast
-import shutil
+import csv
+import json
+import re
 from pathlib import Path
+
+import cv2
+import numpy as np
+import pandas as pd
 
 from detection import detectFaces
 from alignment import alignFace
 from embeding import getEmbedding
 
 
-# ============================================================
-# CONFIGURATION
-# ============================================================
+BASE_DIR = Path(__file__).resolve().parents[2]
 
-# Folder containing the user's search/selfie image
-SEARCH_FOLDER = Path("public/search")
+SEARCH_DIR = BASE_DIR / "public" / "search"
+UPLOAD_DIR = BASE_DIR / "public" / "upload"
+EMBEDDING_CSV = BASE_DIR / "embeddings.csv"
 
-# CSV containing stored face embeddings
-EMBEDDING_CSV = Path("embeddings.csv")
+RESULTS_DIR = BASE_DIR / "app" / "processing" / "evaluation_results"
 
-# Folder where matching photos will be copied
-RETRIEVED_DIR = Path("public/retrieved")
+TARGET_PERSON = "george_w_bush"
+PRECISION_TARGET = 0.95
 
-# Initial prototype threshold
-SIMILARITY_THRESHOLD = 0.45
+THRESHOLDS = np.round(np.arange(0.20, 0.801, 0.01), 2)
+
+IMAGE_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".webp",
+    ".bmp", ".tif", ".tiff"
+}
 
 
-# ============================================================
-# FIND SEARCH IMAGE
-# ============================================================
+def normalize_name(name):
+    return re.sub(
+        r"[^a-z0-9]+",
+        "_",
+        name.lower()
+    ).strip("_")
 
-def get_search_image():
-    """
-    Find the search image inside public/search/.
 
-    Supported:
-        search.png
-        search.jpeg
-        search.jpg
-    """
+def find_query_image():
+    if not SEARCH_DIR.is_dir():
+        raise FileNotFoundError(
+            f"Search directory not found: {SEARCH_DIR}"
+        )
 
-    possible_files = [
-        SEARCH_FOLDER / "search.png",
-        SEARCH_FOLDER / "search.jpeg",
-        SEARCH_FOLDER / "search.jpg"
+    images = sorted(
+        path for path in SEARCH_DIR.iterdir()
+        if path.is_file()
+        and path.suffix.lower() in IMAGE_EXTENSIONS
+    )
+
+    if not images:
+        raise FileNotFoundError(
+            f"No supported images found in {SEARCH_DIR}"
+        )
+
+    preferred = [
+        path for path in images
+        if path.stem.lower() == "search"
     ]
 
-    for image_path in possible_files:
-        if image_path.exists():
-            return image_path
+    if preferred:
+        return preferred[0]
 
-    raise FileNotFoundError(
-        "Search image not found.\n"
-        "Put search.png, search.jpeg or search.jpg "
-        "inside public/search/"
+    if len(images) == 1:
+        return images[0]
+
+    raise RuntimeError(
+        "Multiple query images found. Keep one image in "
+        "public/search or name the intended image search.jpg."
     )
 
 
-# ============================================================
-# PARSE EMBEDDING
-# ============================================================
+def generate_query_embedding(image_path):
+    image = cv2.imread(str(image_path))
 
-def parse_embedding(value):
-    """
-    Convert embedding stored in CSV into NumPy array.
-    """
-
-    if isinstance(value, np.ndarray):
-        embedding = value
-
-    else:
-        try:
-            embedding = np.array(
-                ast.literal_eval(str(value)),
-                dtype=np.float32
-            )
-        except Exception as e:
-            raise ValueError(
-                f"Could not parse embedding: {e}"
-            )
-
-    # Flatten in case the embedding is not 1-D
-    if embedding.ndim != 1:
-        embedding = embedding.flatten()
-
-    return embedding
-
-
-# ============================================================
-# GENERATE QUERY EMBEDDING
-# ============================================================
-
-def getQueryEmbedding(img_path):
-    """
-    Detect the face in the search image,
-    align it and generate its ArcFace embedding.
-    """
-
-    # --------------------------------------------------------
-    # Read image
-    # --------------------------------------------------------
-
-    img = cv2.imread(str(img_path))
-
-    if img is None:
+    if image is None:
         raise ValueError(
-            f"Could not read image: {img_path}"
+            f"Could not read query image: {image_path}"
         )
 
-    # --------------------------------------------------------
-    # Detect faces
-    # --------------------------------------------------------
-
-    faces = detectFaces(str(img_path))
+    faces = detectFaces(str(image_path))
 
     if len(faces) == 0:
         raise ValueError(
-            "No face detected in search image."
+            "No face detected in the query image."
         )
 
     if len(faces) > 1:
         raise ValueError(
-            "Multiple faces detected in search image. "
-            "Please provide an image containing one face."
+            f"Found {len(faces)} faces in the query image. "
+            "Use a selfie containing only one person."
         )
 
-    # --------------------------------------------------------
-    # Get the only detected face
-    # --------------------------------------------------------
-
-    face = faces[0]
-
-    # --------------------------------------------------------
-    # Align face
-    # --------------------------------------------------------
-
     aligned_face = alignFace(
-        img,
-        face["landmarks"]
+        image,
+        faces[0]["landmarks"]
     )
 
-    # --------------------------------------------------------
-    # Generate ArcFace embedding
-    # --------------------------------------------------------
-
-    embedding = getEmbedding(
-        aligned_face
-    )
-
-    # --------------------------------------------------------
-    # Convert to NumPy
-    # --------------------------------------------------------
+    embedding = getEmbedding(aligned_face)
 
     embedding = np.asarray(
         embedding,
         dtype=np.float32
     ).flatten()
 
+    if not np.all(np.isfinite(embedding)):
+        raise ValueError("Query embedding contains invalid values.")
+
+    if np.linalg.norm(embedding) == 0:
+        raise ValueError("Query embedding has zero norm.")
+
     return embedding
 
 
-# ============================================================
-# COSINE SIMILARITY
-# ============================================================
+def parse_embedding(value):
+    if isinstance(value, np.ndarray):
+        embedding = value.astype(np.float32)
 
-def calculate_similarity(
-    query_embedding,
-    stored_embedding
-):
-    """
-    Calculate cosine similarity between
-    query and stored face embeddings.
-    """
+    else:
+        try:
+            parsed = json.loads(str(value))
+        except (json.JSONDecodeError, TypeError):
+            parsed = ast.literal_eval(str(value))
 
-    query_embedding = query_embedding.reshape(
-        1, -1
-    )
-
-    stored_embedding = stored_embedding.reshape(
-        1, -1
-    )
-
-    similarity = cosine_similarity(
-        query_embedding,
-        stored_embedding
-    )[0][0]
-
-    return float(similarity)
-
-
-# ============================================================
-# LOAD CSV
-# ============================================================
-
-def load_embeddings():
-    """
-    Load face embeddings from CSV.
-
-    Expected columns:
-
-        img_path
-        face_index
-        embedding
-        bbox
-        confidence
-    """
-
-    # --------------------------------------------------------
-    # Check CSV exists
-    # --------------------------------------------------------
-
-    if not EMBEDDING_CSV.exists():
-        raise FileNotFoundError(
-            f"Embedding CSV not found: "
-            f"{EMBEDDING_CSV}"
+        embedding = np.asarray(
+            parsed,
+            dtype=np.float32
         )
 
-    # --------------------------------------------------------
-    # Read CSV
-    # --------------------------------------------------------
+    embedding = embedding.flatten()
 
-    df = pd.read_csv(
-        EMBEDDING_CSV
-    )
+    if not np.all(np.isfinite(embedding)):
+        raise ValueError("Embedding contains invalid values.")
 
-    # --------------------------------------------------------
-    # Expected columns
-    # --------------------------------------------------------
+    if np.linalg.norm(embedding) == 0:
+        raise ValueError("Embedding has zero norm.")
 
-    required_columns = {
-        "img_path",
-        "face_index",
-        "embedding",
-        "bbox",
-        "confidence"
-    }
+    return embedding
 
-    # --------------------------------------------------------
-    # Validate columns
-    # --------------------------------------------------------
 
-    if not required_columns.issubset(
-        df.columns
-    ):
+def cosine_similarity(a, b):
+    if a.shape != b.shape:
         raise ValueError(
-            f"CSV must contain columns: "
-            f"{required_columns}\n"
-            f"Found: {list(df.columns)}"
+            f"Embedding dimensions differ: {a.shape} vs {b.shape}"
         )
 
-    return df
+    denominator = np.linalg.norm(a) * np.linalg.norm(b)
+
+    if denominator == 0:
+        return -1.0
+
+    return float(np.dot(a, b) / denominator)
 
 
-# ============================================================
-# RETRIEVE PHOTOS
-# ============================================================
+def get_identity(filename):
+    name = normalize_name(Path(filename).stem)
 
-def retrieve_photos(
-    threshold=SIMILARITY_THRESHOLD
-):
+    if "george_w_bush" in name:
+        return TARGET_PERSON
 
-    # --------------------------------------------------------
-    # 1. Find search image
-    # --------------------------------------------------------
+    if "colin_powell" in name:
+        return "colin_powell"
 
-    search_img = get_search_image()
+    return None
 
-    print(
-        f"Search image: {search_img}"
-    )
 
-    # --------------------------------------------------------
-    # 2. Generate query embedding
-    # --------------------------------------------------------
+def resolve_image_path(path_string):
+    path = Path(str(path_string))
 
-    query_embedding = getQueryEmbedding(
-        search_img
-    )
+    if path.is_absolute() and path.exists():
+        return path
 
-    print(
-        "Query embedding dimension:",
-        query_embedding.shape
-    )
+    candidates = [
+        BASE_DIR / path,
+        UPLOAD_DIR / path.name
+    ]
 
-    # --------------------------------------------------------
-    # 3. Load stored embeddings
-    # --------------------------------------------------------
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
 
-    df = load_embeddings()
+    return candidates[0]
 
-    print(
-        f"Loaded {len(df)} face embeddings."
-    )
 
-    # --------------------------------------------------------
-    # 4. Compare query against every stored face
-    # --------------------------------------------------------
-
-    matches = []
-
-    for index, row in df.iterrows():
-
-        # ----------------------------------------------------
-        # Get image path from CSV
-        # ----------------------------------------------------
-
-        image_path = Path(
-            str(row["img_path"])
+def load_gallery_scores(query_embedding):
+    if not EMBEDDING_CSV.is_file():
+        raise FileNotFoundError(
+            f"Embedding CSV not found: {EMBEDDING_CSV}\n"
+            "Run your existing pipeline first to generate embeddings.csv."
         )
 
+    df = pd.read_csv(EMBEDDING_CSV)
+
+    required_columns = {"img_path", "embedding"}
+
+    if not required_columns.issubset(df.columns):
+        raise ValueError(
+            f"embeddings.csv must contain {required_columns}. "
+            f"Found columns: {list(df.columns)}"
+        )
+
+    # Keep the highest similarity for each photograph.
+    # A group photo may have several face embeddings.
+    image_scores = {}
+
+    for _, row in df.iterrows():
+        image_path = resolve_image_path(row["img_path"])
         image_name = image_path.name
 
+        identity = get_identity(image_name)
+
+        if identity is None:
+            continue
+
         try:
+            stored_embedding = parse_embedding(row["embedding"])
 
-            # ------------------------------------------------
-            # Parse stored embedding
-            # ------------------------------------------------
-
-            stored_embedding = parse_embedding(
-                row["embedding"]
-            )
-            print(
-                f"{image_name} | "
-                f"face={row['face_index']} | "
-                f"embedding norm={np.linalg.norm(stored_embedding):.4f} | "
-                f"first5={stored_embedding[:5]}"
-            )
-
-            # ------------------------------------------------
-            # Check embedding dimensions
-            # ------------------------------------------------
-
-            if (
-                stored_embedding.shape
-                != query_embedding.shape
-            ):
-
-                print(
-                    f"Skipping {image_name} "
-                    f"(face {row['face_index']}): "
-                    f"embedding dimension mismatch."
-                )
-
-                continue
-
-            # ------------------------------------------------
-            # Calculate similarity
-            # ------------------------------------------------
-
-            similarity = calculate_similarity(
+            score = cosine_similarity(
                 query_embedding,
                 stored_embedding
             )
 
-            # ------------------------------------------------
-            # Print score
-            # ------------------------------------------------
+            if (
+                image_name not in image_scores
+                or score > image_scores[image_name]["similarity"]
+            ):
+                image_scores[image_name] = {
+                    "image": image_name,
+                    "path": str(image_path),
+                    "identity": identity,
+                    "similarity": score,
+                    "actual_positive": identity == TARGET_PERSON
+                }
 
+        except Exception as exc:
             print(
-                f"{image_name} "
-                f"| face={row['face_index']} "
-                f"| similarity={similarity:.4f}"
+                f"Skipping embedding for {image_name}: {exc}"
             )
 
-            # ------------------------------------------------
-            # Check threshold
-            # ------------------------------------------------
+    return list(image_scores.values())
 
-            if similarity >= threshold:
 
-                matches.append({
-                    "image_name": image_name,
-                    "image_path": image_path,
-                    "face_index": row["face_index"],
-                    "similarity": similarity
-                })
-
-        except Exception as e:
-
-            print(
-                f"Error processing "
-                f"{image_name}: {e}"
-            )
-
-    # --------------------------------------------------------
-    # 5. Sort matches by similarity
-    # --------------------------------------------------------
-
-    matches.sort(
-        key=lambda x: x["similarity"],
-        reverse=True
+def calculate_metrics(gallery, threshold):
+    tp = sum(
+        item["actual_positive"]
+        and item["similarity"] >= threshold
+        for item in gallery
     )
 
-    # --------------------------------------------------------
-    # 6. Create retrieved directory
-    # --------------------------------------------------------
+    fp = sum(
+        not item["actual_positive"]
+        and item["similarity"] >= threshold
+        for item in gallery
+    )
 
-    RETRIEVED_DIR.mkdir(
+    fn = sum(
+        item["actual_positive"]
+        and item["similarity"] < threshold
+        for item in gallery
+    )
+
+    tn = sum(
+        not item["actual_positive"]
+        and item["similarity"] < threshold
+        for item in gallery
+    )
+
+    total = tp + fp + fn + tn
+    returned = tp + fp
+
+    precision = tp / returned if returned else 0.0
+    recall = tp / (tp + fn) if (tp + fn) else 0.0
+    accuracy = (tp + tn) / total if total else 0.0
+
+    f1 = (
+        2 * precision * recall / (precision + recall)
+        if precision + recall
+        else 0.0
+    )
+
+    return {
+        "threshold": round(float(threshold), 2),
+        "gallery_images": total,
+        "returned": returned,
+        "correct": tp,
+        "wrong": fp,
+        "missed": fn,
+        "true_negative": tn,
+        "accuracy": accuracy,
+        "precision": precision,
+        "recall": recall,
+        "f1": f1
+    }
+
+
+def main():
+    RESULTS_DIR.mkdir(
         parents=True,
         exist_ok=True
     )
 
-    # --------------------------------------------------------
-    # 7. Copy matching photos
-    # --------------------------------------------------------
+    query_path = find_query_image()
 
-    copied_images = set()
+    print(f"Query image: {query_path}")
+    print("Generating query embedding...")
 
-    for match in matches:
+    query_embedding = generate_query_embedding(query_path)
 
-        image_name = match["image_name"]
+    print("Loading stored gallery embeddings...")
 
-        # ----------------------------------------------------
-        # Multiple faces can belong to same photo.
-        #
-        # Example:
-        #
-        # photo1.jpg -> face 0 -> match
-        # photo1.jpg -> face 1 -> match
-        #
-        # We only want to copy photo1.jpg once.
-        # ----------------------------------------------------
+    gallery = load_gallery_scores(query_embedding)
 
-        if image_name in copied_images:
-            continue
+    if not gallery:
+        raise RuntimeError(
+            "No labelled gallery images found. Check embeddings.csv "
+            "and ensure filenames contain George_W_Bush or Colin_Powell."
+        )
 
-        # ----------------------------------------------------
-        # Get actual source path from CSV
-        # ----------------------------------------------------
+    positives = sum(
+        item["actual_positive"] for item in gallery
+    )
 
-        source_path = match["image_path"]
+    negatives = len(gallery) - positives
 
-        # ----------------------------------------------------
-        # Check image exists
-        # ----------------------------------------------------
+    if positives == 0 or negatives == 0:
+        raise RuntimeError(
+            "The labelled gallery must contain both George W. Bush "
+            "and Colin Powell photographs."
+        )
 
-        if not source_path.exists():
+    print(f"Unique gallery images evaluated: {len(gallery)}")
+    print(f"George W. Bush images: {positives}")
+    print(f"Colin Powell images: {negatives}")
 
-            print(
-                f"Warning: image not found: "
-                f"{source_path}"
+    # Save per-image scores so results can be inspected.
+    scores_path = RESULTS_DIR / "image_similarity_scores.csv"
+
+    with scores_path.open(
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=[
+                "image",
+                "identity",
+                "similarity",
+                "actual_positive"
+            ]
+        )
+
+        writer.writeheader()
+
+        for item in sorted(
+            gallery,
+            key=lambda x: x["similarity"],
+            reverse=True
+        ):
+            writer.writerow({
+                "image": item["image"],
+                "identity": item["identity"],
+                "similarity": round(item["similarity"], 6),
+                "actual_positive": item["actual_positive"]
+            })
+
+    # Evaluate every candidate threshold.
+    rows = [
+        calculate_metrics(gallery, threshold)
+        for threshold in THRESHOLDS
+    ]
+
+    report_path = RESULTS_DIR / "threshold_report.csv"
+
+    with report_path.open(
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=rows[0].keys()
+        )
+        writer.writeheader()
+        writer.writerows(rows)
+
+    # Choose the highest-recall threshold that meets
+    # the configured precision target.
+    eligible = [
+        row for row in rows
+        if row["precision"] >= PRECISION_TARGET
+        and row["returned"] > 0
+    ]
+
+    if eligible:
+        best = max(
+            eligible,
+            key=lambda row: (
+                row["recall"],
+                row["precision"],
+                row["threshold"]
             )
-
-            continue
-
-        # ----------------------------------------------------
-        # Destination
-        # ----------------------------------------------------
-
-        destination_path = (
-            RETRIEVED_DIR / image_name
         )
 
-        # ----------------------------------------------------
-        # Copy image
-        # ----------------------------------------------------
-
-        shutil.copy2(
-            source_path,
-            destination_path
+        selection_rule = (
+            f"Highest recall with precision >= {PRECISION_TARGET:.0%}"
         )
 
-        copied_images.add(
-            image_name
+    else:
+        best = max(
+            rows,
+            key=lambda row: (
+                row["f1"],
+                row["precision"]
+            )
         )
 
-        print(
-            f"MATCH: {image_name} "
-            f"| similarity = "
-            f"{match['similarity']:.4f}"
+        selection_rule = (
+            f"No threshold met the {PRECISION_TARGET:.0%} precision "
+            "target; selected the threshold with the highest F1 score."
         )
 
-    # --------------------------------------------------------
-    # 8. Final result
-    # --------------------------------------------------------
+    best_threshold = best["threshold"]
 
-    print("\n==============================")
-    print("PHOTO RETRIEVAL COMPLETE")
-    print("==============================")
+    matches = [
+        item for item in gallery
+        if item["similarity"] >= best_threshold
+    ]
+
+    matches_path = RESULTS_DIR / "best_threshold_results.csv"
+
+    with matches_path.open(
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+        fields = [
+            "image",
+            "identity",
+            "similarity",
+            "correct_match"
+        ]
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=fields
+        )
+
+        writer.writeheader()
+
+        for item in sorted(
+            matches,
+            key=lambda x: x["similarity"],
+            reverse=True
+        ):
+            writer.writerow({
+                "image": item["image"],
+                "identity": item["identity"],
+                "similarity": round(item["similarity"], 6),
+                "correct_match": item["actual_positive"]
+            })
+
+    print("\n========== THRESHOLD EVALUATION ==========")
+    print(f"Query image: {query_path.name}")
+    print(f"Gallery size: {len(gallery)}")
+    print(f"Target photographs: {positives}")
+    print(f"Other-person photographs: {negatives}")
+    print(f"Selected threshold: {best_threshold:.2f}")
+    print(f"Selection rule: {selection_rule}")
+    print(f"Returned photographs: {best['returned']}")
+    print(f"Correct photographs: {best['correct']}")
+    print(f"Incorrect photographs: {best['wrong']}")
+    print(f"Missed target photographs: {best['missed']}")
+    print(f"True negatives: {best['true_negative']}")
+    print(f"Accuracy: {best['accuracy']:.2%}")
+    print(f"Precision: {best['precision']:.2%}")
+    print(f"Recall: {best['recall']:.2%}")
+    print(f"F1 score: {best['f1']:.4f}")
+
+    print("\nSaved reports:")
+    print(f"Threshold report: {report_path}")
+    print(f"Image similarity scores: {scores_path}")
+    print(f"Selected-threshold matches: {matches_path}")
 
     print(
-        f"CSV entries       : {len(df)}"
+        "\nIMPORTANT: This threshold is calibrated on this gallery "
+        "and query. Validate it using other query images and identities "
+        "before treating it as a general threshold."
     )
 
-    print(
-        f"Matching entries  : {len(matches)}"
-    )
-
-    print(
-        f"Photos retrieved  : "
-        f"{len(copied_images)}"
-    )
-
-    print(
-        f"Output directory  : "
-        f"{RETRIEVED_DIR}"
-    )
-
-    return matches
-
-
-# ============================================================
-# MAIN
-# ============================================================
 
 if __name__ == "__main__":
-
-    results = retrieve_photos()
-
-    print("\nFinal matches:")
-
-    for result in results:
-
-        print(
-            f"{result['image_name']} "
-            f"-> "
-            f"{result['similarity']:.4f}"
-        )
+    main()
